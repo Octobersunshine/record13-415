@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
-from ecdf_utils import compute_ecdf, plot_ecdf, ecdf_statistics
+from ecdf_utils import compute_ecdf, plot_ecdf, ecdf_statistics, pairwise_ks_tests
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
@@ -64,6 +64,15 @@ HTML_PAGE = r"""
   .upload-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .divider { border: none; border-top: 1px dashed var(--border); margin: 12px 0; }
   .empty-msg { color: var(--muted); font-size: 14px; text-align: center; padding: 32px 0; }
+  .ks-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  .ks-table th, .ks-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: center; }
+  .ks-table th { background: #f8f9fb; color: var(--muted); font-weight: 600; }
+  .ks-table th:first-child, .ks-table td:first-child { text-align: left; }
+  .ks-sig { font-weight: 700; }
+  .ks-sig-001 { color: #b91c1c; }
+  .ks-sig-01 { color: #c2410c; }
+  .ks-sig-05 { color: #a16207; }
+  .ks-sig-ns { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -93,6 +102,10 @@ HTML_PAGE = r"""
       <label>图片高度 <input id="imgHeight" type="number" value="500" min="300" max="1000"></label>
       <label>全局透明度 <input id="alphaSlider" type="range" min="10" max="100" value="100" oninput="document.getElementById('alphaVal').textContent=this.value+'%'">
         <span style="font-size:12px;color:var(--muted)">当前: <b id="alphaVal">100%</b></span></label>
+      <label style="flex-direction:row;align-items:center;gap:8px;margin-top:10px;">
+        <input type="checkbox" id="showKs" checked style="width:auto;">
+        <span style="font-size:13px;color:var(--text)">显示 KS 检验标注</span>
+      </label>
     </div>
     <div class="actions" style="margin-top:20px;">
       <button class="btn btn-primary" onclick="generate()">🎨 生成 ECDF 图</button>
@@ -102,6 +115,8 @@ HTML_PAGE = r"""
   <div class="card" id="resultCard" style="display:none;">
     <h2>分析结果</h2>
     <div id="stats"></div>
+    <hr class="divider" id="ksDivider" style="display:none;">
+    <div id="ksTests"></div>
     <hr class="divider">
     <div id="result"></div>
   </div>
@@ -185,6 +200,7 @@ function handleFiles(event) {
 async function generate() {
   if (datasets.length === 0) { alert('请先添加至少一组数据集'); return; }
   const alphaVal = parseInt(document.getElementById('alphaSlider').value) / 100;
+  const showKs = document.getElementById('showKs').checked;
   const payload = {
     datasets: datasets.map(d => ({ name: d.name, data: parseValues(d.values) })),
     title: document.getElementById('chartTitle').value,
@@ -193,6 +209,7 @@ async function generate() {
     width: parseInt(document.getElementById('imgWidth').value) || 800,
     height: parseInt(document.getElementById('imgHeight').value) || 500,
     alpha: alphaVal,
+    show_ks: showKs,
   };
   const resp = await fetch('/api/ecdf', {
     method: 'POST',
@@ -204,7 +221,43 @@ async function generate() {
   lastImgB64 = result.image;
   document.getElementById('result').innerHTML = `<img src="data:image/png;base64,${result.image}" alt="ECDF 图">`;
   document.getElementById('stats').innerHTML = buildStatsTable(result.statistics);
+  const ksHtml = buildKsTable(result.ks_tests);
+  const ksDiv = document.getElementById('ksDivider');
+  const ksBox = document.getElementById('ksTests');
+  if (ksHtml) {
+    ksDiv.style.display = '';
+    ksBox.innerHTML = ksHtml;
+  } else {
+    ksDiv.style.display = 'none';
+    ksBox.innerHTML = '';
+  }
   document.getElementById('resultCard').style.display = '';
+}
+
+function buildKsTable(ks) {
+  if (!ks || ks.length === 0) return '';
+  const valid = ks.filter(r => r.statistic != null);
+  if (valid.length === 0) return '';
+  let h = '<h3 style="font-size:15px;margin-bottom:8px;">📊 Kolmogorov-Smirnov 两样本检验</h3>';
+  h += '<p style="font-size:12px;color:var(--muted);margin-bottom:6px;">H₀: 两组数据来自同一分布 &nbsp;|&nbsp; 显著性: <span class="ks-sig ks-sig-001">*** p&lt;0.001</span> <span class="ks-sig ks-sig-01">** p&lt;0.01</span> <span class="ks-sig ks-sig-05">* p&lt;0.05</span> <span class="ks-sig ks-sig-ns">ns p≥0.05</span></p>';
+  h += '<table class="ks-table"><thead><tr><th>对比组</th><th>D 统计量</th><th>p 值</th><th>显著性</th><th>最大差异位置 x</th></tr></thead><tbody>';
+  valid.forEach(r => {
+    const p = r.p_value;
+    let pStr, sigCls, sym;
+    if (p < 0.001) { pStr = '< 0.001'; sigCls = 'ks-sig-001'; sym = '***'; }
+    else if (p < 0.01) { pStr = p.toFixed(4); sigCls = 'ks-sig-01'; sym = '**'; }
+    else if (p < 0.05) { pStr = p.toFixed(4); sigCls = 'ks-sig-05'; sym = '*'; }
+    else { pStr = p.toFixed(4); sigCls = 'ks-sig-ns'; sym = 'ns'; }
+    h += `<tr>
+      <td>${escHtml(r.name_i)} <b>vs</b> ${escHtml(r.name_j)}</td>
+      <td>${r.statistic.toFixed(4)}</td>
+      <td>${pStr}</td>
+      <td><span class="ks-sig ${sigCls}">${sym}</span></td>
+      <td>${r.x_at_max != null ? r.x_at_max.toFixed(2) : '-'}</td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  return h;
 }
 
 function buildStatsTable(stats) {
@@ -263,12 +316,14 @@ def api_ecdf():
     width = body.get('width', 800)
     height = body.get('height', 500)
     alpha = body.get('alpha', None)
+    show_ks = body.get('show_ks', True)
 
     img_b64 = plot_ecdf(parsed, title=title, xlabel=xlabel, ylabel=ylabel,
-                         width=width, height=height, alpha=alpha)
+                         width=width, height=height, alpha=alpha, show_ks=show_ks)
     stats = ecdf_statistics(parsed)
+    ks_results = pairwise_ks_tests(parsed) if show_ks else []
 
-    return jsonify({'image': img_b64, 'statistics': stats})
+    return jsonify({'image': img_b64, 'statistics': stats, 'ks_tests': ks_results})
 
 
 if __name__ == '__main__':

@@ -76,30 +76,94 @@ def _calc_visual_weights(counts, alpha=None):
     return weights
 
 
+def _ks_p_value(d, n1, n2):
+    if d <= 0:
+        return 1.0
+    en = np.sqrt(n1 * n2 / (n1 + n2))
+    lam = (en + 0.12 + 0.11 / en) * d
+    if lam < 0.27:
+        return 1.0
+    if lam >= 7.5:
+        return 0.0
+    q = 0.0
+    for k in range(1, 201):
+        term = 2.0 * ((-1.0) ** (k - 1)) * np.exp(-2.0 * k * k * lam * lam)
+        q += term
+        if abs(term) < 1e-8:
+            break
+    return max(0.0, min(1.0, q))
+
+
+def ks_two_sample(data1, data2):
+    arr1 = np.asarray(data1, dtype=float)
+    arr2 = np.asarray(data2, dtype=float)
+    arr1 = arr1[~np.isnan(arr1)]
+    arr2 = arr2[~np.isnan(arr2)]
+    n1, n2 = len(arr1), len(arr2)
+    if n1 == 0 or n2 == 0:
+        return {'statistic': None, 'p_value': None, 'n1': n1, 'n2': n2, 'x_at_max': None}
+    x1 = np.sort(arr1)
+    x2 = np.sort(arr2)
+    all_x = np.unique(np.concatenate([x1, x2]))
+    ecdf1 = np.searchsorted(x1, all_x, side='right') / n1
+    ecdf2 = np.searchsorted(x2, all_x, side='right') / n2
+    diff = np.abs(ecdf1 - ecdf2)
+    idx = np.argmax(diff)
+    d = float(diff[idx])
+    x_max = float(all_x[idx])
+    p = _ks_p_value(d, n1, n2)
+    return {'statistic': d, 'p_value': p, 'n1': n1, 'n2': n2, 'x_at_max': x_max}
+
+
+def pairwise_ks_tests(datasets):
+    results = []
+    cleaned = []
+    for ds in datasets:
+        name = ds.get('name', '未命名')
+        arr = np.asarray(ds.get('data', []), dtype=float)
+        arr = arr[~np.isnan(arr)]
+        cleaned.append({'name': name, 'data': arr})
+    m = len(cleaned)
+    for i in range(m):
+        for j in range(i + 1, m):
+            res = ks_two_sample(cleaned[i]['data'], cleaned[j]['data'])
+            results.append({
+                'i': i, 'j': j,
+                'name_i': cleaned[i]['name'],
+                'name_j': cleaned[j]['name'],
+                'statistic': res['statistic'],
+                'p_value': res['p_value'],
+                'x_at_max': res['x_at_max'],
+            })
+    return results
+
+
 def plot_ecdf(datasets, title='ECDF 对比图', xlabel='数值', ylabel='累积概率',
-              width=800, height=500, dpi=100, alpha=None):
+              width=800, height=500, dpi=100, alpha=None, show_ks=True):
     fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
     font = _get_font_prop()
 
     counts = []
-    computed = []
+    ecdf_data = []
+    names = []
     for ds in datasets:
+        name = ds.get('name', f'数据集 {len(names) + 1}')
         data = ds.get('data', [])
         x, y = compute_ecdf(data)
-        computed.append(x)
+        ecdf_data.append((x, y))
         counts.append(len(x))
+        names.append(name)
     weights = _calc_visual_weights(counts, alpha=alpha)
 
-    for i, ds in enumerate(datasets):
-        name = ds.get('name', f'数据集 {i + 1}')
-        x, y = compute_ecdf(ds.get('data', []))
+    for i in range(len(ecdf_data)):
+        x, y = ecdf_data[i]
         if len(x) == 0:
             continue
         color = _PLOT_COLORS[i % len(_PLOT_COLORS)]
         w = weights[i] if i < len(weights) else {'linewidth': 2, 'alpha': 1.0,
                                                   'marker_alpha': 1.0, 'marker_size': 12,
                                                   'show_markers': True}
-        label_with_n = f'{name}  (n={len(x):,})'
+        label_with_n = f'{names[i]}  (n={len(x):,})'
         ax.step(x, y, where='post', label=label_with_n, color=color,
                 linewidth=w['linewidth'], alpha=w['alpha'])
         if w['show_markers'] and len(x) <= 1000:
@@ -109,6 +173,51 @@ def plot_ecdf(datasets, title='ECDF 对比图', xlabel='数值', ylabel='累积�
             ax.scatter(x_marker, y_marker, s=w['marker_size'], color=color,
                        zorder=3, edgecolors='white', linewidths=0.5,
                        alpha=w['marker_alpha'])
+
+    ks_results = []
+    if show_ks and len(datasets) >= 2:
+        ks_results = pairwise_ks_tests(datasets)
+        valid_ks = [r for r in ks_results if r['statistic'] is not None]
+        if valid_ks:
+            text_lines = ['KS 检验 (两两对比)']
+            for r in valid_ks:
+                d_val = r['statistic']
+                p_val = r['p_value']
+                if p_val < 0.001:
+                    p_str = 'p < 0.001'
+                else:
+                    p_str = f'p = {p_val:.3f}'
+                sig = ' ***' if p_val < 0.001 else (' **' if p_val < 0.01 else (' *' if p_val < 0.05 else ''))
+                text_lines.append(f"{r['name_i']} vs {r['name_j']}:  D={d_val:.3f}, {p_str}{sig}")
+            text_str = '\n'.join(text_lines)
+            ax.text(0.02, 0.98, text_str, transform=ax.transAxes,
+                    fontsize=9, va='top', ha='left',
+                    fontproperties=font,
+                    bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                              edgecolor='#cccccc', alpha=0.92))
+
+            for r in valid_ks:
+                if r['x_at_max'] is None:
+                    continue
+                i_idx, j_idx = r['i'], r['j']
+                xi, yi = ecdf_data[i_idx]
+                xj, yj = ecdf_data[j_idx]
+                if len(xi) == 0 or len(xj) == 0:
+                    continue
+                ecdf_i = np.searchsorted(xi, [r['x_at_max']], side='right')[0] / len(xi)
+                ecdf_j = np.searchsorted(xj, [r['x_at_max']], side='right')[0] / len(xj)
+                y_lo = min(ecdf_i, ecdf_j)
+                y_hi = max(ecdf_i, ecdf_j)
+                color_i = _PLOT_COLORS[i_idx % len(_PLOT_COLORS)]
+                ax.annotate('', xy=(r['x_at_max'], y_hi), xytext=(r['x_at_max'], y_lo),
+                            arrowprops=dict(arrowstyle='<->', color='red', lw=1.3, alpha=0.8))
+                if r['p_value'] < 0.05:
+                    mid_y = (y_lo + y_hi) / 2
+                    ax.text(r['x_at_max'], mid_y, f' D={r["statistic"]:.2f}',
+                            fontsize=8, va='center', ha='left',
+                            color='darkred', fontproperties=font,
+                            bbox=dict(boxstyle='round,pad=0.2', facecolor='#fff0f0',
+                                      edgecolor='red', alpha=0.85))
 
     ax.set_title(title, fontproperties=font, fontsize=14)
     ax.set_xlabel(xlabel, fontproperties=font, fontsize=12)
