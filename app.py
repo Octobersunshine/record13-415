@@ -91,6 +91,8 @@ HTML_PAGE = r"""
       <label>Y 轴标签 <input id="yLabel" value="累积概率"></label>
       <label>图片宽度 <input id="imgWidth" type="number" value="800" min="400" max="1600"></label>
       <label>图片高度 <input id="imgHeight" type="number" value="500" min="300" max="1000"></label>
+      <label>全局透明度 <input id="alphaSlider" type="range" min="10" max="100" value="100" oninput="document.getElementById('alphaVal').textContent=this.value+'%'">
+        <span style="font-size:12px;color:var(--muted)">当前: <b id="alphaVal">100%</b></span></label>
     </div>
     <div class="actions" style="margin-top:20px;">
       <button class="btn btn-primary" onclick="generate()">🎨 生成 ECDF 图</button>
@@ -182,6 +184,7 @@ function handleFiles(event) {
 
 async function generate() {
   if (datasets.length === 0) { alert('请先添加至少一组数据集'); return; }
+  const alphaVal = parseInt(document.getElementById('alphaSlider').value) / 100;
   const payload = {
     datasets: datasets.map(d => ({ name: d.name, data: parseValues(d.values) })),
     title: document.getElementById('chartTitle').value,
@@ -189,6 +192,7 @@ async function generate() {
     ylabel: document.getElementById('yLabel').value,
     width: parseInt(document.getElementById('imgWidth').value) || 800,
     height: parseInt(document.getElementById('imgHeight').value) || 500,
+    alpha: alphaVal,
   };
   const resp = await fetch('/api/ecdf', {
     method: 'POST',
@@ -258,9 +262,10 @@ def api_ecdf():
     ylabel = body.get('ylabel', '累积概率')
     width = body.get('width', 800)
     height = body.get('height', 500)
+    alpha = body.get('alpha', None)
 
     img_b64 = plot_ecdf(parsed, title=title, xlabel=xlabel, ylabel=ylabel,
-                         width=width, height=height)
+                         width=width, height=height, alpha=alpha)
     stats = ecdf_statistics(parsed)
 
     return jsonify({'image': img_b64, 'statistics': stats})

@@ -48,20 +48,67 @@ _PLOT_COLORS = [
 ]
 
 
+def _calc_visual_weights(counts, alpha=None):
+    if not counts:
+        return []
+    max_n = max(counts)
+    min_n = min(counts)
+    weights = []
+    range_n = max_n - min_n if max_n != min_n else 1
+    for n in counts:
+        ratio = (n - min_n) / range_n
+        lw = 3.2 - ratio * 2.2
+        line_alpha = 1.0 - ratio * 0.55
+        if alpha is not None:
+            line_alpha = line_alpha * float(alpha)
+        marker_alpha = line_alpha
+        marker_size = 18.0 - ratio * 14.0
+        show_markers = n <= 200 or max_n <= 50
+        if n > 200 and max_n > 50 and ratio > 0.3:
+            marker_alpha = line_alpha * 0.5
+        weights.append({
+            'linewidth': round(lw, 2),
+            'alpha': round(line_alpha, 3),
+            'marker_alpha': round(marker_alpha, 3),
+            'marker_size': round(marker_size, 2),
+            'show_markers': show_markers,
+        })
+    return weights
+
+
 def plot_ecdf(datasets, title='ECDF 对比图', xlabel='数值', ylabel='累积概率',
-              width=800, height=500, dpi=100):
+              width=800, height=500, dpi=100, alpha=None):
     fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
     font = _get_font_prop()
 
-    for i, ds in enumerate(datasets):
-        name = ds.get('name', f'数据集 {i + 1}')
+    counts = []
+    computed = []
+    for ds in datasets:
         data = ds.get('data', [])
         x, y = compute_ecdf(data)
+        computed.append(x)
+        counts.append(len(x))
+    weights = _calc_visual_weights(counts, alpha=alpha)
+
+    for i, ds in enumerate(datasets):
+        name = ds.get('name', f'数据集 {i + 1}')
+        x, y = compute_ecdf(ds.get('data', []))
         if len(x) == 0:
             continue
         color = _PLOT_COLORS[i % len(_PLOT_COLORS)]
-        ax.step(x, y, where='post', label=name, color=color, linewidth=2)
-        ax.scatter(x, y, s=12, color=color, zorder=3, edgecolors='white', linewidths=0.5)
+        w = weights[i] if i < len(weights) else {'linewidth': 2, 'alpha': 1.0,
+                                                  'marker_alpha': 1.0, 'marker_size': 12,
+                                                  'show_markers': True}
+        label_with_n = f'{name}  (n={len(x):,})'
+        ax.step(x, y, where='post', label=label_with_n, color=color,
+                linewidth=w['linewidth'], alpha=w['alpha'])
+        if w['show_markers'] and len(x) <= 1000:
+            step_size = max(1, len(x) // 500)
+            x_marker = x[::step_size]
+            y_marker = y[::step_size]
+            ax.scatter(x_marker, y_marker, s=w['marker_size'], color=color,
+                       zorder=3, edgecolors='white', linewidths=0.5,
+                       alpha=w['marker_alpha'])
 
     ax.set_title(title, fontproperties=font, fontsize=14)
     ax.set_xlabel(xlabel, fontproperties=font, fontsize=12)
